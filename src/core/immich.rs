@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
-use reqwest::{Body, multipart};
+use reqwest::multipart;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tokio_util::codec::{BytesCodec, FramedRead};
 
 use chrono::{SecondsFormat, Utc};
 
@@ -23,11 +22,13 @@ pub async fn upload_asst(server_url: &str, api_key: &str, file_path: PathBuf) ->
     let file_metadata = std::fs::metadata(&file_path).context("Failed to read file metadata")?;
     let file_size = file_metadata.len();
 
-    let file = File::open(&file_path)
+    // 一次性读取整个文件到内存并以固定长度（而非 chunked 流式传输）发送：
+    // 部分代理（如 macOS 上的调试/抓包代理）无法正确转发没有 Content-Length
+    // 的分块 multipart 请求体，会导致服务端收到的表单字段（deviceAssetId、
+    // fileCreatedAt 等）丢失或为空。
+    let file_bytes = tokio::fs::read(&file_path)
         .await
-        .context("Failed to open file")?;
-    let stream = FramedRead::new(file, BytesCodec::new());
-    let body = Body::wrap_stream(stream);
+        .context("Failed to read file")?;
 
     let created_at: chrono::DateTime<Utc> = file_metadata
         .created()
@@ -41,7 +42,7 @@ pub async fn upload_asst(server_url: &str, api_key: &str, file_path: PathBuf) ->
     let modified_at_string = modified_at.to_rfc3339_opts(SecondsFormat::Millis, true);
     let device_asset_id = format!("{}-{}", file_name, file_size);
 
-    let file_part = multipart::Part::stream(body)
+    let file_part = multipart::Part::bytes(file_bytes)
         .file_name(file_name.to_string())
         .mime_str(&mime_type)
         .context("Failed to set MIME type")?;
